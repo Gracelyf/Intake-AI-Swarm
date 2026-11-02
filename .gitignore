@@ -25,3 +25,4 @@ Thumbs.db
 # clone runs out of the box. It contains only public annual aggregates and
 # synthetic modelled rows (see source_tier column).
 .Rhistory
+appeals.db
