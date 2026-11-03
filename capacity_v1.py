@@ -43,14 +43,14 @@ COMPLETIONS_SHAPE = "flat"          # "flat" = equal monthly split
 HOURS_PER_CASE_B = 4.0              # avg staff hours per Section B case
 EFFECTIVE_HOURS_PER_FTE_MONTH = 140.0  # 35 h/week x 4 weeks
 
-SECTION = "B"
+SECTION = "A"
 SERIES = "objections"
 SOURCE_TIER = "synthetic_modelled"
 
 METHOD = (
-    "v1: Section B objections completions split FLAT from verified annual "
+    "v1: Section A (Objection stage) monthly completions split FLAT from verified annual "
     "processed (2023-24: 82764; 2024-25: 118077; CRA Departmental Results "
-    "Reports). Flat monthly shape is a modelling assumption, not CRA data. "
+    "Reports; objections processed = Section A outflow, confirmed 2026-11-02). Section B completions NOT in this table. Flat monthly shape is a modelling assumption, not CRA data. "
     "2022-23 not built (processed NULL, no official source). FTE headcount "
     "NOT modelled (no verified source). hours_per_case=4h and "
     "effective_hours_per_fte_month=140h are pure assumptions for the +20% "
@@ -132,13 +132,13 @@ def main() -> None:
     ).fetchone()[0]
     assert n_2223 == 0, "2022-23 must stay missing (processed NULL)"
     n_a = con.execute(
-        "SELECT COUNT(*) FROM capacity_modelled WHERE section='A'"
+        "SELECT COUNT(*) FROM capacity_modelled WHERE section='B'"
     ).fetchone()[0]
-    assert n_a == 0, "v1 is Section B only"
+    assert n_a == 0, "v1 is Section A only"
 
     con.commit()
     print(f"Wrote {DB} (capacity_modelled {n_rows} rows: "
-          f"{len(rows)} fiscal years x 12 months, Section B objections)")
+          f"{len(rows)} fiscal years x 12 months, Section A objections)")
     print(f"params: hours_per_case={HOURS_PER_CASE_B}, "
           f"effective_hours_per_fte_month={EFFECTIVE_HOURS_PER_FTE_MONTH}, "
           f"fte_modelled=NULL")
