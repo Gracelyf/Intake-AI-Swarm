@@ -34,6 +34,7 @@ Distributions (assumptions, not CRA data):
 
 from datetime import date, timedelta
 from pathlib import Path
+import math
 import random
 import sqlite3
 
@@ -41,6 +42,9 @@ BASE = Path(__file__).parent
 DB = BASE / "appeals.db"
 
 RANDOM_SEED = 20261102
+AMOUNT_SEED = RANDOM_SEED + 1000  # separate RNG stream for amounts: existing
+                                  # columns stay bit-identical when amounts
+                                  # are added/changed
 TRANSFER_RATE = 0.04          # per month: round(n * 0.04) cases -> litigation
 DAYS_MIN, DAYS_MAX = 90, 365  # days from processed month to litigation intake
 CATEGORIES = [
@@ -52,6 +56,15 @@ CATEGORIES = [
 COMPLEXITY = [("low", 0.30), ("medium", 0.50), ("high", 0.20)]
 GROUP_CODES = ["0001", "0002", "0003"]
 PROJECT_CODES = ["1000", "1200", "1300", "1700", "1800"]
+# amount_involved (CAD): lognormal per category — tax disputes are heavy-tailed
+# (many small, few huge). Medians are PURE ASSUMPTIONS, not CRA data.
+AMOUNT_MEDIAN = {
+    "personal_income_tax": 8000,
+    "corporate_income_tax": 60000,
+    "gst_hst": 15000,
+    "benefits_credits_other": 3000,
+}
+AMOUNT_SIGMA = 1.2  # lognormal sigma (tail weight), pure assumption
 
 # Synthetic name pools (Canadian mix: English, French, South/East Asian,
 # Middle Eastern, Latin American). Names are fiction; duplicates expected.
@@ -95,8 +108,11 @@ METHOD = (
     "uniform {1000,1200,1300,1700,1800}; litigation=1 for round(n*0.04) "
     "randomly sampled per processed month (transfer at completion); "
     "litigation_intake_month = processed_month + days_in_litigation (uniform "
-    "90-365 days); NULLs when litigation=0 (assumptions, not CRA data; "
-    "seed 20261102)."
+    "90-365 days); amount_involved (CAD, integer dollars) lognormal per "
+    "category, medians PIT 8000 / CIT 60000 / GST-HST 15000 / benefits+other "
+    "3000, sigma 1.2 (heavy tail — pure assumptions, not CRA data); NULLs "
+    "when litigation=0 (assumptions, not CRA data; "
+    "seed 20261102, amounts on separate stream seed 20262102)."
 )
 
 
@@ -124,6 +140,8 @@ def main() -> None:
         return
 
     rng = random.Random(RANDOM_SEED)
+    amount_rng = random.Random(AMOUNT_SEED)  # separate stream: adding amounts
+                                            # never changes existing columns
 
     # --- pass 1: generate rows ---
     rows = []
@@ -141,13 +159,16 @@ def main() -> None:
                 lit_month = (base_day + timedelta(days=days)).strftime("%Y-%m")
             else:
                 days, lit_month = None, None
+            category = _pick(rng, CATEGORIES)
+            amount = max(1, int(amount_rng.lognormvariate(
+                math.log(AMOUNT_MEDIAN[category]), AMOUNT_SIGMA)))
             rows.append({
                 "objections_case_id": f"OB-{seq:06d}",
                 "litigation_case_id": None,  # assigned in pass 2
                 "fiscal_year": fy,
                 "processed_month": cal_m,
                 "section": SECTION,
-                "category": _pick(rng, CATEGORIES),
+                "category": category,
                 "complexity": _pick(rng, COMPLEXITY),
                 "client_name": f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}",
                 "group_code": rng.choice(GROUP_CODES),
@@ -155,6 +176,7 @@ def main() -> None:
                 "litigation": litigation,
                 "litigation_intake_month": lit_month,
                 "days_in_litigation": days,
+                "amount_involved": amount,
             })
 
     # --- pass 2: assign litigation IDs in intake-month order ---
@@ -181,18 +203,20 @@ def main() -> None:
   litigation INTEGER,
   litigation_intake_month TEXT,
   days_in_litigation INTEGER,
+  amount_involved INTEGER,
   source_tier TEXT,
   method TEXT
 )"""
     )
     for r in rows:
         con.execute(
-            "INSERT INTO cases_modelled VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO cases_modelled VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (r["objections_case_id"], r["litigation_case_id"], r["fiscal_year"],
              r["processed_month"], r["section"], r["category"], r["complexity"],
              r["client_name"], r["group_code"], r["project_code"],
              r["litigation"], r["litigation_intake_month"],
-             r["days_in_litigation"], SOURCE_TIER, METHOD),
+             r["days_in_litigation"], r["amount_involved"],
+             SOURCE_TIER, METHOD),
         )
 
     # --- calibration checks ---
@@ -238,6 +262,19 @@ def main() -> None:
         "SELECT COUNT(*) FROM cases_modelled WHERE section != 'Objections'").fetchone()[0]
     assert n_sec == 0
     print("check: section always 'Objections';")
+    bad_amt = con.execute(
+        "SELECT COUNT(*) FROM cases_modelled WHERE amount_involved IS NULL "
+        "OR amount_involved < 1").fetchone()[0]
+    assert bad_amt == 0
+    medians = {}
+    for cat, in con.execute("SELECT DISTINCT category FROM cases_modelled"):
+        vals = sorted(r[0] for r in con.execute(
+            "SELECT amount_involved FROM cases_modelled WHERE category=?", (cat,)))
+        medians[cat] = vals[len(vals) // 2]
+    parts = [c.split("_")[0] + "~" + format(m, ",d")
+             for c, m in sorted(medians.items())]
+    print("check: amount_involved all positive, no NULLs; category medians "
+          "(CAD): " + ", ".join(parts) + ";")
     sample = con.execute(
         "SELECT objections_case_id, litigation_case_id, client_name, group_code, "
         "project_code FROM cases_modelled WHERE litigation=1 LIMIT 3").fetchall()
