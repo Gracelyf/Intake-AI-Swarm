@@ -9,18 +9,14 @@ WHAT THIS DOES (per Liang 2026-11-02):
   section='Litigation'):
       completions_modelled(month)
         = round(0.80 x #{cases_modelled rows with processed_month=month AND litigation=1})
-  i.e. each month, 80% of the cases that transferred to Litigation complete —
-  "each month's litigation-entering cases have an 80% completion rate".
-
-  Derivation chain (also in every row's method field):
-  annual Objections processed (verified) -> monthly processed (seasonal split)
-  -> 4%/month randomly sampled to litigation (cases_v1.py) -> 80% complete.
-
-  Drops the old capacity_modelled table.
-
-WHAT THIS IS NOT:
-  Published Litigation figures — they do not exist publicly; everything here
-  is derived, every step labelled. FTE headcount NOT modelled (NULL).
+      fte_modelled(month)
+        = round(completions_modelled x 4.0 / 140.0, 2)
+  i.e. each month, 80% of the cases that transferred to Litigation complete,
+  and the implied FTE to clear that month's completions is derived from the
+  same assumptions (4h/case, 140h/FTE-month). "Derived" means: no real
+  headcount source exists; this is the workload expressed in FTE units,
+  labelled synthetic_modelled — the column answers "how many FTE did
+  Litigation need that month", NOT "how many staff were employed".
 """
 
 from pathlib import Path
@@ -37,13 +33,15 @@ SECTION = "Litigation"
 SOURCE_TIER = "synthetic_modelled"
 METHOD = (
     "synthetic: monthly Litigation completions = round(0.80 x cases transferred "
-    "to Litigation that processed_month). Chain: verified annual Objections "
+    "to Litigation that processed_month); fte_modelled = round(completions x "
+    "4.0h/case / 140h per FTE-month, 2) = workload expressed in FTE units "
+    "(implied staffing to clear that month's completions; NOT real headcount, "
+    "no published source). Chain: verified annual Objections "
     "processed -> seasonal monthly split (assumption) -> round(n*0.04)/month "
     "randomly sampled to litigation (cases_v1.py, seed 20261102) -> 80% "
     "completion rate per Liang 2026-11-02 (domain knowledge). No public source "
-    "gives Litigation intake/completions. FTE headcount NOT modelled (no "
-    "verified source). hours_per_case=4h and effective_hours_per_fte_month=140h "
-    "are pure assumptions for the +20% scenario FTE-gap formula, pending "
+    "gives Litigation intake/completions/headcount. hours_per_case=4h and "
+    "effective_hours_per_fte_month=140h are pure assumptions, pending "
     "confirmation."
 )
 
@@ -86,9 +84,10 @@ def main() -> None:
     for r in rows:
         cal_m, n_lit = r["processed_month"], r["n_lit"]
         comp = round(n_lit * LITIGATION_COMPLETION_RATE)
+        fte = round(comp * HOURS_PER_CASE / EFFECTIVE_HOURS_PER_FTE_MONTH, 2)
         con.execute(
             "INSERT INTO litigation_capacity_modelled VALUES (?,?,?,?,?,?,?,?,?)",
-            (fiscal_year_of(cal_m), cal_m, SECTION, comp, None,
+            (fiscal_year_of(cal_m), cal_m, SECTION, comp, fte,
              HOURS_PER_CASE, EFFECTIVE_HOURS_PER_FTE_MONTH,
              SOURCE_TIER, METHOD))
         n_rows += 1
@@ -96,12 +95,15 @@ def main() -> None:
     # --- calibration checks ---
     for r in rows:
         cal_m, n_lit = r["processed_month"], r["n_lit"]
-        expected = round(n_lit * LITIGATION_COMPLETION_RATE)
-        got = con.execute(
-            "SELECT completions_modelled FROM litigation_capacity_modelled "
+        expected_comp = round(n_lit * LITIGATION_COMPLETION_RATE)
+        expected_fte = round(expected_comp * HOURS_PER_CASE
+                             / EFFECTIVE_HOURS_PER_FTE_MONTH, 2)
+        got_comp, got_fte = con.execute(
+            "SELECT completions_modelled, fte_modelled FROM litigation_capacity_modelled "
             "WHERE calendar_month=? AND section=?",
-            (cal_m, SECTION)).fetchone()[0]
-        assert got == expected, f"{cal_m}: {got} != {expected}"
+            (cal_m, SECTION)).fetchone()
+        assert got_comp == expected_comp, f"{cal_m}: {got_comp} != {expected_comp}"
+        assert got_fte == expected_fte, f"{cal_m}: {got_fte} != {expected_fte}"
     n_sec = con.execute(
         "SELECT COUNT(*) FROM litigation_capacity_modelled WHERE section != 'Litigation'"
     ).fetchone()[0]

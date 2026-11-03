@@ -4,12 +4,19 @@ Run from the repo folder (expects appeals.db with monthly_modelled alongside):
 
     python3 cases_v1.py
 
-WHAT THIS DOES (per Liang 2026-11-02):
+WHAT THIS DOES (per Liang 2026-11-02, amended same evening):
   - One row per Objections processed case from monthly_modelled
-    (2023-24: 87,543 + 2024-25: 118,077 = 205,620 rows; 2022-23 not built).
+    (2023-24: 82,764 + 2024-25: 118,077 = 200,841 rows; 2022-23 not built).
+  - Two ID columns: objections_case_id ("OB-000001", every row, PRIMARY KEY)
+    and litigation_case_id ("LIT-000001", only rows with litigation=1, in
+    litigation_intake_month order; NULL otherwise).
+  - client_name: realistic-looking "First Last" names (English, French, and
+    common immigrant-origin names reflecting Canadian diversity). Synthetic —
+    duplicates expected, one client may have several cases.
   - section = 'Objections' for every row. Columns 'series' and 'completeness'
     dropped.
-  - New columns: client_name, group_code, project_code.
+  - New columns: group_code (0001/0002/0003), project_code
+    (1000/1200/1300/1700/1800).
   - New column 'litigation' (0/1): each month, exactly round(n*0.04) of that
     month's processed cases are randomly sampled to transfer to Litigation.
   - New columns 'litigation_intake_month' (= processed_month + days_in_litigation)
@@ -23,7 +30,6 @@ Distributions (assumptions, not CRA data):
   complexity: low 30 / medium 50 / high 20
   group_code: uniform over 0001, 0002, 0003
   project_code: uniform over 1000, 1200, 1300, 1700, 1800
-  client_name: synthetic sequential IDs (Client-000001, ...), unique
 """
 
 from datetime import date, timedelta
@@ -47,17 +53,50 @@ COMPLEXITY = [("low", 0.30), ("medium", 0.50), ("high", 0.20)]
 GROUP_CODES = ["0001", "0002", "0003"]
 PROJECT_CODES = ["1000", "1200", "1300", "1700", "1800"]
 
+# Synthetic name pools (Canadian mix: English, French, South/East Asian,
+# Middle Eastern, Latin American). Names are fiction; duplicates expected.
+FIRST_NAMES = [
+    "James", "Mary", "Robert", "Jennifer", "Michael", "Linda", "William",
+    "Sarah", "David", "Emma", "Richard", "Olivia", "Thomas", "Sophia",
+    "Charles", "Ava", "Daniel", "Emily", "Matthew", "Chloe", "Liam",
+    "Noah", "Lucas", "Ethan", "Oliver", "Elijah", "Benjamin", "Harper",
+    "Evelyn", "Abigail", "Ella", "Scarlett", "Grace", "Victoria", "Lily",
+    "Aria", "Zoey", "Nora", "Hazel", "Stella", "Jean", "Pierre", "Marie",
+    "François", "Sophie", "Isabelle", "Michel", "André", "Nicole",
+    "Claude", "Diane", "Julien", "Camille", "Laurent", "Sylvie", "Raj",
+    "Priya", "Amit", "Arjun", "Ananya", "Vikram", "Meera", "Rohan",
+    "Divya", "Wei", "Fang", "Lei", "Min", "Jing", "Tao", "Ahmed",
+    "Fatima", "Omar", "Hassan", "Aisha", "Yusuf",
+]
+LAST_NAMES = [
+    "Smith", "Johnson", "Brown", "Taylor", "Miller", "Davis", "Wilson",
+    "Moore", "Clark", "Lewis", "Walker", "Hall", "Young", "King",
+    "Wright", "Scott", "Green", "Adams", "Baker", "Nelson", "Carter",
+    "Mitchell", "Roberts", "Turner", "Phillips", "Campbell", "Parker",
+    "Evans", "Edwards", "Collins", "Stewart", "Morris", "Rogers", "Reed",
+    "Cook", "Morgan", "Bell", "Murphy", "Bailey", "Rivera", "Cooper",
+    "Richardson", "Cox", "Howard", "Ward", "Tremblay", "Gagnon", "Roy",
+    "Côté", "Bouchard", "Gauthier", "Lavoie", "Fortin", "Morin",
+    "Pelletier", "Bélanger", "Lévesque", "Singh", "Kaur", "Patel",
+    "Sharma", "Gupta", "Khan", "Chen", "Wang", "Li", "Zhang", "Liu",
+    "Yang", "Huang", "Xu", "Zhao", "Wu", "Nguyen", "Tran", "Kim",
+    "Park", "Wong", "Garcia", "Martinez", "Ahmed", "Hassan", "Ali",
+]
+
 SECTION = "Objections"
 SOURCE_TIER = "synthetic_modelled"
 METHOD = (
     "synthetic: one row per Objections processed case (monthly_modelled); "
-    "section always 'Objections'; category PIT50 CIT20 GST/HST15 benefits+other15; "
+    "objections_case_id for all rows (PK), litigation_case_id only when "
+    "litigation=1 (in litigation_intake_month order); section always "
+    "'Objections'; client_name = synthetic 'First Last' (fictional, "
+    "duplicates expected); category PIT50 CIT20 GST/HST15 benefits+other15; "
     "complexity L30 M50 H20; group_code uniform {0001,0002,0003}; project_code "
-    "uniform {1000,1200,1300,1700,1800}; client_name synthetic sequential IDs; "
-    "litigation=1 for round(n*0.04) randomly sampled per processed month "
-    "(transfer at completion); litigation_intake_month = processed_month + "
-    "days_in_litigation (uniform 90-365 days); NULLs when litigation=0 "
-    "(assumptions, not CRA data; seed 20261102)."
+    "uniform {1000,1200,1300,1700,1800}; litigation=1 for round(n*0.04) "
+    "randomly sampled per processed month (transfer at completion); "
+    "litigation_intake_month = processed_month + days_in_litigation (uniform "
+    "90-365 days); NULLs when litigation=0 (assumptions, not CRA data; "
+    "seed 20261102)."
 )
 
 
@@ -85,11 +124,52 @@ def main() -> None:
         return
 
     rng = random.Random(RANDOM_SEED)
+
+    # --- pass 1: generate rows ---
+    rows = []
+    seq = 0
+    for fy, cal_m, n in monthly:
+        y, m = int(cal_m[:4]), int(cal_m[5:7])
+        base_day = date(y, m, 1)
+        k = round(n * TRANSFER_RATE)
+        lit_idx = set(rng.sample(range(n), k)) if k else set()
+        for i in range(n):
+            seq += 1
+            litigation = 1 if i in lit_idx else 0
+            if litigation:
+                days = rng.randint(DAYS_MIN, DAYS_MAX)
+                lit_month = (base_day + timedelta(days=days)).strftime("%Y-%m")
+            else:
+                days, lit_month = None, None
+            rows.append({
+                "objections_case_id": f"OB-{seq:06d}",
+                "litigation_case_id": None,  # assigned in pass 2
+                "fiscal_year": fy,
+                "processed_month": cal_m,
+                "section": SECTION,
+                "category": _pick(rng, CATEGORIES),
+                "complexity": _pick(rng, COMPLEXITY),
+                "client_name": f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}",
+                "group_code": rng.choice(GROUP_CODES),
+                "project_code": rng.choice(PROJECT_CODES),
+                "litigation": litigation,
+                "litigation_intake_month": lit_month,
+                "days_in_litigation": days,
+            })
+
+    # --- pass 2: assign litigation IDs in intake-month order ---
+    lit_rows = sorted(
+        (r for r in rows if r["litigation"]),
+        key=lambda r: (r["litigation_intake_month"], r["objections_case_id"]))
+    for n, r in enumerate(lit_rows, start=1):
+        r["litigation_case_id"] = f"LIT-{n:06d}"
+
     con.execute("DROP TABLE IF EXISTS cases_modelled")
     con.execute("DROP TABLE IF EXISTS transitions_modelled")
     con.execute(
         """CREATE TABLE cases_modelled (
-  case_id TEXT PRIMARY KEY,
+  objections_case_id TEXT PRIMARY KEY,
+  litigation_case_id TEXT,
   fiscal_year TEXT,
   processed_month TEXT,
   section TEXT,
@@ -105,30 +185,15 @@ def main() -> None:
   method TEXT
 )"""
     )
-
-    seq, total_lit = 0, 0
-    for fy, cal_m, n in monthly:
-        y, m = int(cal_m[:4]), int(cal_m[5:7])
-        base_day = date(y, m, 1)
-        k = round(n * TRANSFER_RATE)
-        lit_idx = set(rng.sample(range(n), k)) if k else set()
-        total_lit += k
-        for i in range(n):
-            seq += 1
-            litigation = 1 if i in lit_idx else 0
-            if litigation:
-                days = rng.randint(DAYS_MIN, DAYS_MAX)
-                lit_month = (base_day + timedelta(days=days)).strftime("%Y-%m")
-            else:
-                days, lit_month = None, None
-            con.execute(
-                "INSERT INTO cases_modelled VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (f"OB-{seq:06d}", fy, cal_m, SECTION,
-                 _pick(rng, CATEGORIES), _pick(rng, COMPLEXITY),
-                 f"Client-{seq:06d}",
-                 rng.choice(GROUP_CODES), rng.choice(PROJECT_CODES),
-                 litigation, lit_month, days, SOURCE_TIER, METHOD),
-            )
+    for r in rows:
+        con.execute(
+            "INSERT INTO cases_modelled VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (r["objections_case_id"], r["litigation_case_id"], r["fiscal_year"],
+             r["processed_month"], r["section"], r["category"], r["complexity"],
+             r["client_name"], r["group_code"], r["project_code"],
+             r["litigation"], r["litigation_intake_month"],
+             r["days_in_litigation"], SOURCE_TIER, METHOD),
+        )
 
     # --- calibration checks ---
     expected_total = sum(n for _, _, n in monthly)
@@ -141,9 +206,22 @@ def main() -> None:
             (cal_m,)).fetchone()[0]
         assert got == n, f"{cal_m}: {got} != {n}"
     print("check: per-month case counts tie exactly to monthly_modelled;")
-    rate = total_lit / got_total
+    n_lit = con.execute(
+        "SELECT COUNT(*) FROM cases_modelled WHERE litigation=1").fetchone()[0]
+    rate = n_lit / got_total
     assert abs(rate - TRANSFER_RATE) < 0.002, f"litigation rate {rate}"
-    print(f"check: litigation=1 rows {total_lit} (rate {rate:.4f}, target 0.04);")
+    print(f"check: litigation=1 rows {n_lit} (rate {rate:.4f}, target 0.04);")
+    bad_id = con.execute(
+        "SELECT COUNT(*) FROM cases_modelled WHERE "
+        "(litigation=1 AND litigation_case_id IS NULL) OR "
+        "(litigation=0 AND litigation_case_id IS NOT NULL)").fetchone()[0]
+    assert bad_id == 0
+    n_lit_id = con.execute(
+        "SELECT COUNT(DISTINCT litigation_case_id) FROM cases_modelled "
+        "WHERE litigation=1").fetchone()[0]
+    assert n_lit_id == n_lit
+    print("check: litigation_case_id present+unique exactly for litigation=1, "
+          "in intake-month order;")
     bad_days = con.execute(
         "SELECT COUNT(*) FROM cases_modelled WHERE litigation=1 AND "
         f"(days_in_litigation < {DAYS_MIN} OR days_in_litigation > {DAYS_MAX})"
@@ -159,10 +237,11 @@ def main() -> None:
     n_sec = con.execute(
         "SELECT COUNT(*) FROM cases_modelled WHERE section != 'Objections'").fetchone()[0]
     assert n_sec == 0
-    n_cli = con.execute(
-        "SELECT COUNT(DISTINCT client_name) FROM cases_modelled").fetchone()[0]
-    assert n_cli == got_total
-    print("check: section always 'Objections'; client_name unique;")
+    print("check: section always 'Objections';")
+    sample = con.execute(
+        "SELECT objections_case_id, litigation_case_id, client_name, group_code, "
+        "project_code FROM cases_modelled WHERE litigation=1 LIMIT 3").fetchall()
+    print("sample litigation rows:", [tuple(s) for s in sample])
     print(f"check: transitions_modelled dropped (folded into cases).")
     con.commit()
     print(f"Wrote {DB} (cases_modelled {got_total} rows)")
