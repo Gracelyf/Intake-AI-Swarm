@@ -11,7 +11,13 @@ WHAT THIS DOES:
   - Splits each annual processed total FLAT across the 12 fiscal months
     (Apr-Mar), largest-remainder so monthly integers sum EXACTLY to the
     annual total. 118,077 / 12 = 9 x 9840 + 3 x 9839; 82,764 / 12 = 6897 exact.
-  - Writes capacity_modelled: Section B, objections series only (v1).
+  - Writes capacity_modelled: Section A (Objection stage) monthly completions,
+    objections series only (v1). These ARE the verified annual processed
+    figures split flat — objections processed = cases completing the
+    Objection stage = Section A outflow (Liang's correction, 2026-11-02).
+    Section B completions are NOT in this table: no published source splits
+    processed by section. The +20% scenario derives B completions as
+    A completions x transfer rate (labelled assumption).
 
 WHAT THIS IS NOT:
   - Flat monthly completions are a modelling ASSUMPTION, not CRA data.
@@ -22,9 +28,10 @@ WHAT THIS IS NOT:
   - 2022-23 is NOT built: processed is NULL in annual_real (no official
     source; v3 anchor explicitly warns against back-filling from rounded
     percentages). Completions stay missing for that year.
-  - Section A is NOT built: annual processed is a single total, not split by
-    section, so A cannot be calibrated the same way. v1 is B only (the +20%
-    scenario asks about B).
+  - Section A is built here (not B): annual processed IS Section A completions,
+    so A can be calibrated exactly. Section B completions cannot be
+    calibrated the same way (no published source splits processed by
+    section) — the scenario derives them as A x transfer rate instead.
   - FTE headcount is NOT modelled (fte_modelled = NULL): no verified FTE
     source, so no headcount numbers are invented. The FTE gap is computed by
     formula in the scenario tool, not from a stored headcount.
@@ -43,15 +50,20 @@ COMPLETIONS_SHAPE = "flat"          # "flat" = equal monthly split
 HOURS_PER_CASE_B = 4.0              # avg staff hours per Section B case
 EFFECTIVE_HOURS_PER_FTE_MONTH = 140.0  # 35 h/week x 4 weeks
 
-SECTION = "A"
+SECTION = "Objections"
 SERIES = "objections"
 SOURCE_TIER = "synthetic_modelled"
 
 METHOD = (
-    "v1: Section A (Objection stage) monthly completions split FLAT from verified annual "
-    "processed (2023-24: 82764; 2024-25: 118077; CRA Departmental Results "
-    "Reports; objections processed = Section A outflow, confirmed 2026-11-02). Section B completions NOT in this table. Flat monthly shape is a modelling assumption, not CRA data. "
-    "2022-23 not built (processed NULL, no official source). FTE headcount "
+    "v1: Objections monthly completions split FLAT from "
+    "verified annual processed (2023-24: 82764; 2024-25: 118077; CRA "
+    "Departmental Results Reports; objections processed = Objections "
+    "outflow, confirmed 2026-11-02). Flat "
+    "monthly shape is a modelling assumption, not CRA data. 2022-23 not "
+    "built (processed NULL, no official source). Litigation completions NOT "
+    "in this table (no published source); the +20% scenario derives them as "
+    "Objections completions x transfer rate 0.04 (labelled assumption). "
+    "FTE headcount "
     "NOT modelled (no verified source). hours_per_case=4h and "
     "effective_hours_per_fte_month=140h are pure assumptions for the +20% "
     "scenario FTE-gap formula (extra cases x hours per case / effective "
@@ -131,14 +143,14 @@ def main() -> None:
         "SELECT COUNT(*) FROM capacity_modelled WHERE fiscal_year='2022-23'"
     ).fetchone()[0]
     assert n_2223 == 0, "2022-23 must stay missing (processed NULL)"
-    n_a = con.execute(
-        "SELECT COUNT(*) FROM capacity_modelled WHERE section='B'"
+    n_lit = con.execute(
+        "SELECT COUNT(*) FROM capacity_modelled WHERE section='Litigation'"
     ).fetchone()[0]
-    assert n_a == 0, "v1 is Section A only"
+    assert n_lit == 0, "v1 is Objections only (Litigation completions not published)"
 
     con.commit()
     print(f"Wrote {DB} (capacity_modelled {n_rows} rows: "
-          f"{len(rows)} fiscal years x 12 months, Section A objections)")
+          f"{len(rows)} fiscal years x 12 months, Objections)")
     print(f"params: hours_per_case={HOURS_PER_CASE_B}, "
           f"effective_hours_per_fte_month={EFFECTIVE_HOURS_PER_FTE_MONTH}, "
           f"fte_modelled=NULL")

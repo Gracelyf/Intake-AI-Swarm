@@ -17,7 +17,8 @@ calibration checks below still have to pass. Liang only needs to confirm
 (or edit) these lines before running tonight:
   - Section A = Objection (received, not yet escalated); Section B = Litigation
     (escalated by the client after an unsatisfactory Objection outcome — not
-    every A case proceeds to B). Tables store only 'A' / 'B'; the real-stage
+    every Objections case proceeds to Litigation with probability 0.04).
+    Tables store 'Objections' / 'Litigation' (CRA stage names); the real-stage
     names live in this docstring and in capstone_decisions_v2.md.
   - Categories (objections only for v1): personal income tax 50% /
     corporate income tax 20% / GST/HST 15% / benefits & credits + other 15%.
@@ -80,8 +81,8 @@ METHOD = (
     "Objection process duration uniform 90-365 days per case "
     "(assumptions, not CRA data); monthly A intake = monthly_modelled objections"
 )
-SECTION_A = "A"   # Objection — tables store only 'A' / 'B', never stage names
-SECTION_B = "B"   # Litigation (see decisions file for the definitions)
+SECTION_A = "Objections"   # tables store CRA stage names (renamed 2026-11-02)
+SECTION_B = "Litigation"   # (see decisions file for the definitions)
 
 
 def _pick(rng, weighted):
@@ -162,7 +163,7 @@ def main() -> int:
                 days = _days_in_a(rng)
                 trans_month = (intake_date + _dt.timedelta(days=days)).strftime("%Y-%m")
                 trans_rows.append(
-                    (case_id, "A", "B", trans_month, days, "synthetic_modelled", METHOD)
+                    (case_id, "Objections", "Litigation", trans_month, days, "synthetic_modelled", METHOD)
                 )
             else:
                 section = SECTION_A
