@@ -12,12 +12,11 @@ WHAT THIS DOES:
   with a 3/4/5-hour sensitivity range.
 
 WHERE THE INPUTS COME FROM (all already in appeals.db):
-  - Litigation_intake(t)  = capacity_modelled Objections completions x TRANSFER_RATE
-    (transfer happens at completion of the Objection stage — per Liang 2026-11-02;
-    Litigation received ~= Objections processed x 0.04)
-  - Litigation_completions(t) = Litigation_intake(t) x LITIGATION_COMPLETION_RATE
-    (monthly completion rate is 80% of Litigation received — per Liang
-    2026-11-02, domain knowledge)
+  - Litigation_completions(t): litigation_capacity_modelled, section='Litigation'
+    = round(0.80 x cases transferred to Litigation that month) — capacity_v1.py
+  - Litigation_intake(t) = Litigation_completions(t) / 0.80
+    (exact inverse: completions are defined as 80% of transferred)
+  - Opening Litigation inventory = 2023-24 net backlog (87543 - 82764 = 4779) x 0.04
 
 THIS IS A LABELLED SCENARIO, NOT A FORECAST. Key assumptions (all labelled
 in the output):
@@ -54,25 +53,23 @@ def main() -> None:
     con.row_factory = sqlite3.Row
 
     months = [r["calendar_month"] for r in con.execute(
-        "SELECT calendar_month FROM capacity_modelled "
-        "WHERE fiscal_year=? AND series='objections' AND section='Objections' "
+        "SELECT calendar_month FROM litigation_capacity_modelled "
+        "WHERE fiscal_year=? AND section='Litigation' "
         "ORDER BY calendar_month",
         (FY,))]
     assert len(months) == 12, f"expected 12 months for {FY}"
 
-    comp_a = {r["calendar_month"]: r["completions_modelled"] for r in con.execute(
-        "SELECT calendar_month, completions_modelled FROM capacity_modelled "
-        "WHERE fiscal_year=? AND series='objections' AND section='Objections'", (FY,))}
-    assert len(comp_a) == 12, "capacity_modelled Objections rows missing"
+    comp_lit = {r["calendar_month"]: r["completions_modelled"] for r in con.execute(
+        "SELECT calendar_month, completions_modelled FROM litigation_capacity_modelled "
+        "WHERE fiscal_year=? AND section='Litigation'", (FY,))}
+    assert len(comp_lit) == 12, "litigation_capacity_modelled rows missing"
 
     opening_b = OPENING_TOTAL_NET_2324 * TRANSFER_RATE
     print(f"SCENARIO (not a forecast): Litigation intake x{SCENARIO_UPLIFT} "
           f"over {FY} (12 months)")
-    print(f"Assumptions: transfer rate={TRANSFER_RATE}; "
-          f"Litigation intake ~= Objections processed x {TRANSFER_RATE} "
-          f"(transfer at completion, per Liang 2026-11-02); "
-          f"Litigation completions = {LITIGATION_COMPLETION_RATE:.0%} of Litigation "
-          f"received each month (Liang domain knowledge); "
+    print(f"Assumptions: Litigation completions from litigation_capacity_modelled "
+          f"(= round(0.80 x transferred cases), per Liang 2026-11-02); "
+          f"Litigation intake = completions / 80% (exact inverse); "
           f"opening Litigation inventory ~= 2023-24 net "
           f"{OPENING_TOTAL_NET_2324} x {TRANSFER_RATE} = {opening_b:.1f}; "
           f"hours/case {HOURS_PER_CASE_RANGE}, {EFFECTIVE_HOURS_PER_FTE_MONTH}h/FTE-month "
@@ -84,9 +81,9 @@ def main() -> None:
     total_extra_cases = 0.0
     peak_extra_cases, peak_extra_m = 0.0, months[0]
     for m in months:
-        b_in = comp_a[m] * TRANSFER_RATE
+        b_comp = comp_lit[m]
+        b_in = b_comp / LITIGATION_COMPLETION_RATE
         b_in_scen = b_in * SCENARIO_UPLIFT
-        b_comp = b_in * LITIGATION_COMPLETION_RATE
         extra = b_in_scen - b_in
         total_extra_cases += extra
         if extra > peak_extra_cases:
@@ -99,10 +96,10 @@ def main() -> None:
         print(f"{m:<8}{b_in:>9.1f}{b_in_scen:>9.1f}{b_comp:>9.1f}"
               f"{inv:>9.1f}{wait:>9.2f}")
 
-    end_wait = inv / (comp_a[months[-1]] * TRANSFER_RATE * LITIGATION_COMPLETION_RATE)
+    end_wait = inv / comp_lit[months[-1]]
     print(f"\nEnd inventory: {inv:.0f} cases (opened at {opening_b:.0f}); "
           f"peak {peak_inv:.0f} in {peak_m}.")
-    print(f"Implied wait (Little's Law): {opening_b / (comp_a[months[0]] * TRANSFER_RATE):.1f} "
+    print(f"Implied wait (Little's Law): {opening_b / comp_lit[months[0]]:.1f} "
           f"-> {end_wait:.1f} months.")
     print(f"Total extra Litigation cases over 12 months: {total_extra_cases:.0f}.")
     print("Hold-flat FTE gap (extra cases x hours/case / 140h):")

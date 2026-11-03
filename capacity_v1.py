@@ -1,42 +1,26 @@
-"""Build the capacity_modelled table in appeals.db — capstone Day 3 (Sun 2026-11-01).
+"""Build litigation_capacity_modelled — monthly Litigation completions (redesign 2026-11-02).
 
-Run from the repo folder (expects appeals.db alongside this script):
+Run from the repo folder (expects appeals.db with cases_modelled alongside):
 
     python3 capacity_v1.py
 
-WHAT THIS DOES:
-  - Reads annual_real objections PROCESSED for the two fiscal years that have
-    verified values (2023-24: 82,764; 2024-25: 118,077; CRA Departmental
-    Results Reports).
-  - Splits each annual processed total FLAT across the 12 fiscal months
-    (Apr-Mar), largest-remainder so monthly integers sum EXACTLY to the
-    annual total. 118,077 / 12 = 9 x 9840 + 3 x 9839; 82,764 / 12 = 6897 exact.
-  - Writes capacity_modelled: Section A (Objection stage) monthly completions,
-    objections series only (v1). These ARE the verified annual processed
-    figures split flat — objections processed = cases completing the
-    Objection stage = Section A outflow (Liang's correction, 2026-11-02).
-    Section B completions are NOT in this table: no published source splits
-    processed by section. The +20% scenario derives B completions as
-    A completions x transfer rate (labelled assumption).
+WHAT THIS DOES (per Liang 2026-11-02):
+  Writes litigation_capacity_modelled (series column dropped; every row
+  section='Litigation'):
+      completions_modelled(month)
+        = round(0.80 x #{cases_modelled rows with processed_month=month AND litigation=1})
+  i.e. each month, 80% of the cases that transferred to Litigation complete —
+  "each month's litigation-entering cases have an 80% completion rate".
+
+  Derivation chain (also in every row's method field):
+  annual Objections processed (verified) -> monthly processed (seasonal split)
+  -> 4%/month randomly sampled to litigation (cases_v1.py) -> 80% complete.
+
+  Drops the old capacity_modelled table.
 
 WHAT THIS IS NOT:
-  - Flat monthly completions are a modelling ASSUMPTION, not CRA data.
-    Completions are staff output and smoother than intake; the flat shape lets
-    backlog accumulate in intake peak months (e.g. July) and clear in trough
-    months, which is what the +20% scenario needs. Shape is a parameter —
-    change it and re-run.
-  - 2022-23 is NOT built: processed is NULL in annual_real (no official
-    source; v3 anchor explicitly warns against back-filling from rounded
-    percentages). Completions stay missing for that year.
-  - Section A is built here (not B): annual processed IS Section A completions,
-    so A can be calibrated exactly. Section B completions cannot be
-    calibrated the same way (no published source splits processed by
-    section) — the scenario derives them as A x transfer rate instead.
-  - FTE headcount is NOT modelled (fte_modelled = NULL): no verified FTE
-    source, so no headcount numbers are invented. The FTE gap is computed by
-    formula in the scenario tool, not from a stored headcount.
-
-PARAMETERS (all assumptions, not CRA data — change and re-run):
+  Published Litigation figures — they do not exist publicly; everything here
+  is derived, every step labelled. FTE headcount NOT modelled (NULL).
 """
 
 from pathlib import Path
@@ -45,62 +29,49 @@ import sqlite3
 BASE = Path(__file__).parent
 DB = BASE / "appeals.db"
 
-# --- v1 parameters (pure assumptions; pending Liang's confirmation) ---
-COMPLETIONS_SHAPE = "flat"          # "flat" = equal monthly split
-HOURS_PER_CASE_B = 4.0              # avg staff hours per Section B case
-EFFECTIVE_HOURS_PER_FTE_MONTH = 140.0  # 35 h/week x 4 weeks
+LITIGATION_COMPLETION_RATE = 0.80  # monthly completions = 80% of transferred cases (Liang domain knowledge, 2026-11-02)
+HOURS_PER_CASE = 4.0               # avg staff hours per Litigation case (pure assumption)
+EFFECTIVE_HOURS_PER_FTE_MONTH = 140.0  # 35 h/week x 4 weeks (pure assumption)
 
-SECTION = "Objections"
-SERIES = "objections"
+SECTION = "Litigation"
 SOURCE_TIER = "synthetic_modelled"
-
 METHOD = (
-    "v1: Objections monthly completions split FLAT from "
-    "verified annual processed (2023-24: 82764; 2024-25: 118077; CRA "
-    "Departmental Results Reports; objections processed = Objections "
-    "outflow, confirmed 2026-11-02). Flat "
-    "monthly shape is a modelling assumption, not CRA data. 2022-23 not "
-    "built (processed NULL, no official source). Litigation completions NOT "
-    "in this table (no published source); the +20% scenario derives them as "
-    "Objections completions x transfer rate 0.04 (labelled assumption). "
-    "FTE headcount "
-    "NOT modelled (no verified source). hours_per_case=4h and "
-    "effective_hours_per_fte_month=140h are pure assumptions for the +20% "
-    "scenario FTE-gap formula (extra cases x hours per case / effective "
-    "hours), pending confirmation."
+    "synthetic: monthly Litigation completions = round(0.80 x cases transferred "
+    "to Litigation that processed_month). Chain: verified annual Objections "
+    "processed -> seasonal monthly split (assumption) -> round(n*0.04)/month "
+    "randomly sampled to litigation (cases_v1.py, seed 20261102) -> 80% "
+    "completion rate per Liang 2026-11-02 (domain knowledge). No public source "
+    "gives Litigation intake/completions. FTE headcount NOT modelled (no "
+    "verified source). hours_per_case=4h and effective_hours_per_fte_month=140h "
+    "are pure assumptions for the +20% scenario FTE-gap formula, pending "
+    "confirmation."
 )
 
 
-def fiscal_months(fiscal_year: str) -> list:
-    """'2024-25' -> ['2024-04', ..., '2025-03'] (Apr-Mar fiscal year)."""
-    start = int(fiscal_year.split("-")[0])
-    return [f"{start + (m > 12):04d}-{((m - 1) % 12) + 1:02d}"
-            for m in range(4, 16)]
-
-
-def flat_split(total: int, n: int = 12) -> list:
-    """Largest-remainder split: n integer months summing exactly to total."""
-    base, rem = divmod(total, n)
-    return [base + 1 if i < rem else base for i in range(n)]
+def fiscal_year_of(calendar_month: str) -> str:
+    y, m = int(calendar_month[:4]), int(calendar_month[5:7])
+    if m >= 4:
+        return f"{y}-{str(y + 1)[-2:]}"
+    return f"{y - 1}-{str(y)[-2:]}"
 
 
 def main() -> None:
-    assert COMPLETIONS_SHAPE == "flat", "v1 only supports flat split"
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
-
     rows = con.execute(
-        "SELECT fiscal_year, objections_processed FROM annual_real "
-        "WHERE objections_processed IS NOT NULL ORDER BY fiscal_year"
+        "SELECT processed_month, COUNT(*) AS n_lit FROM cases_modelled "
+        "WHERE litigation=1 GROUP BY processed_month ORDER BY processed_month"
     ).fetchall()
-    assert rows, "annual_real has no processed rows"
+    if not rows:
+        print("cases_modelled has no litigation=1 rows — run cases_v1.py first.")
+        return
 
     con.execute("DROP TABLE IF EXISTS capacity_modelled")
+    con.execute("DROP TABLE IF EXISTS litigation_capacity_modelled")
     con.execute(
-        """CREATE TABLE capacity_modelled (
+        """CREATE TABLE litigation_capacity_modelled (
   fiscal_year TEXT,
   calendar_month TEXT,
-  series TEXT,
   section TEXT,
   completions_modelled INTEGER,
   fte_modelled REAL,
@@ -108,52 +79,44 @@ def main() -> None:
   effective_hours_per_fte_month REAL,
   source_tier TEXT,
   method TEXT,
-  PRIMARY KEY (fiscal_year, series, section, calendar_month)
+  PRIMARY KEY (fiscal_year, section, calendar_month)
 )"""
     )
-
     n_rows = 0
     for r in rows:
-        fy, total = r["fiscal_year"], r["objections_processed"]
-        months = fiscal_months(fy)
-        assert len(months) == 12
-        splits = flat_split(total)
-        assert sum(splits) == total, f"{fy}: monthly sum != annual total"
-        for cal_m, comp in zip(months, splits):
-            con.execute(
-                "INSERT INTO capacity_modelled VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (fy, cal_m, SERIES, SECTION, comp, None,
-                 HOURS_PER_CASE_B, EFFECTIVE_HOURS_PER_FTE_MONTH,
-                 SOURCE_TIER, METHOD),
-            )
-            n_rows += 1
+        cal_m, n_lit = r["processed_month"], r["n_lit"]
+        comp = round(n_lit * LITIGATION_COMPLETION_RATE)
+        con.execute(
+            "INSERT INTO litigation_capacity_modelled VALUES (?,?,?,?,?,?,?,?,?)",
+            (fiscal_year_of(cal_m), cal_m, SECTION, comp, None,
+             HOURS_PER_CASE, EFFECTIVE_HOURS_PER_FTE_MONTH,
+             SOURCE_TIER, METHOD))
+        n_rows += 1
 
     # --- calibration checks ---
     for r in rows:
-        fy, total = r["fiscal_year"], r["objections_processed"]
+        cal_m, n_lit = r["processed_month"], r["n_lit"]
+        expected = round(n_lit * LITIGATION_COMPLETION_RATE)
         got = con.execute(
-            "SELECT SUM(completions_modelled) FROM capacity_modelled "
-            "WHERE fiscal_year=? AND series=? AND section=?",
-            (fy, SERIES, SECTION),
-        ).fetchone()[0]
-        assert got == total, f"{fy}: {got} != {total}"
-        print(f"  {fy}: monthly completions sum {got} (annual processed {total})")
-
-    n_2223 = con.execute(
-        "SELECT COUNT(*) FROM capacity_modelled WHERE fiscal_year='2022-23'"
+            "SELECT completions_modelled FROM litigation_capacity_modelled "
+            "WHERE calendar_month=? AND section=?",
+            (cal_m, SECTION)).fetchone()[0]
+        assert got == expected, f"{cal_m}: {got} != {expected}"
+    n_sec = con.execute(
+        "SELECT COUNT(*) FROM litigation_capacity_modelled WHERE section != 'Litigation'"
     ).fetchone()[0]
-    assert n_2223 == 0, "2022-23 must stay missing (processed NULL)"
-    n_lit = con.execute(
-        "SELECT COUNT(*) FROM capacity_modelled WHERE section='Litigation'"
-    ).fetchone()[0]
-    assert n_lit == 0, "v1 is Objections only (Litigation completions not published)"
-
+    assert n_sec == 0
+    n_series = con.execute("PRAGMA table_info(litigation_capacity_modelled)").fetchall()
+    assert not any(c[1] == "series" for c in n_series), "series column must be gone"
+    total = con.execute(
+        "SELECT SUM(completions_modelled) FROM litigation_capacity_modelled").fetchone()[0]
+    print(f"check: {n_rows} months, every completions_modelled = round(0.80 x transferred);")
+    print(f"check: section all 'Litigation', no series column; total = {total}.")
     con.commit()
-    print(f"Wrote {DB} (capacity_modelled {n_rows} rows: "
-          f"{len(rows)} fiscal years x 12 months, Objections)")
-    print(f"params: hours_per_case={HOURS_PER_CASE_B}, "
-          f"effective_hours_per_fte_month={EFFECTIVE_HOURS_PER_FTE_MONTH}, "
-          f"fte_modelled=NULL")
+    print(f"Wrote {DB} (litigation_capacity_modelled {n_rows} rows)")
+    print(f"params: litigation_completion_rate={LITIGATION_COMPLETION_RATE}, "
+          f"hours_per_case={HOURS_PER_CASE}, "
+          f"effective_hours_per_fte_month={EFFECTIVE_HOURS_PER_FTE_MONTH}")
     con.close()
 
 
